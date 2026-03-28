@@ -26,21 +26,36 @@ async function startServer() {
         rooms[roomId] = [];
       }
       
-      // Notify others in the room
-      rooms[roomId].forEach(userId => {
-        socket.to(userId).emit("user-joined", socket.id);
-      });
+      // Check if user is already in room
+      if (!rooms[roomId].includes(socket.id)) {
+        // Notify others in room
+        rooms[roomId].forEach(userId => {
+          socket.to(userId).emit("user-joined", socket.id);
+        });
 
-      rooms[roomId].push(socket.id);
-      socket.join(roomId);
-      
-      console.log(`User ${socket.id} joined room ${roomId}`);
+        rooms[roomId].push(socket.id);
+        socket.join(roomId);
+        
+        console.log(`User ${socket.id} joined room ${roomId}`);
+      }
+    });
 
-      socket.on("disconnect", () => {
+    socket.on("leave-room", (roomId: string) => {
+      if (rooms[roomId]) {
         rooms[roomId] = rooms[roomId].filter(id => id !== socket.id);
         socket.to(roomId).emit("user-left", socket.id);
+        socket.leave(roomId);
         console.log(`User ${socket.id} left room ${roomId}`);
+      }
+    });
+
+    socket.on("disconnect", () => {
+      // Remove from all rooms
+      Object.keys(rooms).forEach(roomId => {
+        rooms[roomId] = rooms[roomId].filter(id => id !== socket.id);
+        socket.to(roomId).emit("user-left", socket.id);
       });
+      console.log(`User ${socket.id} disconnected`);
     });
 
     socket.on("signal", (data: { to: string; signal: any }) => {

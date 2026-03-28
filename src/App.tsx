@@ -82,7 +82,14 @@ export default function App() {
 
   useEffect(() => {
     // Initialize socket connection
-    socketRef.current = io();
+    const isProduction = window.location.hostname !== 'localhost';
+    const serverUrl = isProduction 
+      ? window.location.origin 
+      : 'ws://localhost:3000';
+    
+    socketRef.current = io(serverUrl, {
+      transports: ['websocket', 'polling']
+    });
 
     // Check for room ID in URL
     const params = new URLSearchParams(window.location.search);
