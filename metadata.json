@@ -1,0 +1,5 @@
+{
+  "name": "ScreenShare Hub",
+  "description": "A professional real-time screen sharing platform for collaborative watching and meetings.",
+  "requestFramePermissions": ["camera", "microphone", "display-capture"]
+}
