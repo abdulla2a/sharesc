@@ -166,6 +166,12 @@ export default function App() {
     e.preventDefault();
     if (!roomId || !userName) return;
 
+    // Check if already in a room
+    if (inRoom) {
+      setError("You are already in a room. Please leave first.");
+      return;
+    }
+
     // Simple demo mode - just show local video
     setInRoom(true);
     
@@ -187,6 +193,9 @@ export default function App() {
     setInRoom(false);
     setPeers([]);
     peersRef.current = [];
+    setRoomId('');
+    setUserName('');
+    setError(null);
   };
 
   const copyRoomLink = () => {
