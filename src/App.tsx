@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import Peer from 'simple-peer';
+import { io, Socket } from 'socket.io-client';
 import { 
   Monitor, 
   Users, 
@@ -24,7 +25,6 @@ interface PeerConnection {
 }
 
 // --- Components ---
-
 const VideoTile = ({ stream, isLocal, name }: { stream?: MediaStream; isLocal?: boolean; name: string }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
 
@@ -74,13 +74,12 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [micEnabled, setMicEnabled] = useState(false);
   const [videoEnabled, setVideoEnabled] = useState(false);
-  const [micStream, setMicStream] = useState<MediaStream | null>(null);
   
   const peersRef = useRef<PeerConnection[]>([]);
   const streamRef = useRef<MediaStream | null>(null);
+  const socketRef = useRef<Socket | null>(null);
 
   useEffect(() => {
-    // Check for room ID in URL
     const params = new URLSearchParams(window.location.search);
     const roomFromUrl = params.get('room');
     if (roomFromUrl) {
@@ -88,15 +87,30 @@ export default function App() {
     }
   }, []);
 
+  const updatePeersState = () => {
+    setPeers([...peersRef.current]);
+  };
+
+  const addPeerStream = (peerId: string, peer: Peer.Instance, stream: MediaStream) => {
+    peersRef.current = peersRef.current.map(p => 
+      p.peerId === peerId ? { ...p, stream } : p
+    );
+    updatePeersState();
+  };
+
+  const clearAllPeers = () => {
+    peersRef.current.forEach(p => p.peer.destroy());
+    peersRef.current = [];
+    updatePeersState();
+  };
+
   const toggleMic = async () => {
     try {
       if (micEnabled) {
-        micStream?.getAudioTracks().forEach(track => track.stop());
-        setMicStream(null);
+        streamRef.current?.getAudioTracks().forEach(track => track.enabled = false);
         setMicEnabled(false);
       } else {
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        setMicStream(stream);
+        streamRef.current?.getAudioTracks().forEach(track => track.enabled = true);
         setMicEnabled(true);
       }
     } catch (err) {
@@ -108,12 +122,10 @@ export default function App() {
   const toggleVideo = async () => {
     try {
       if (videoEnabled) {
-        localStream?.getVideoTracks().forEach(track => track.stop());
-        if (!isSharing) setLocalStream(null);
+        streamRef.current?.getVideoTracks().forEach(track => track.enabled = false);
         setVideoEnabled(false);
       } else {
-        const stream = await navigator.mediaDevices.getUserMedia({ video: true });
-        setLocalStream(stream);
+        streamRef.current?.getVideoTracks().forEach(track => track.enabled = true);
         setVideoEnabled(true);
       }
     } catch (err) {
@@ -124,7 +136,7 @@ export default function App() {
 
   const startScreenShare = async () => {
     try {
-      const stream = await navigator.mediaDevices.getDisplayMedia({
+      const screenStream = await navigator.mediaDevices.getDisplayMedia({
         video: {
           width: { ideal: 1920, max: 1920 },
           height: { ideal: 1080, max: 1080 },
@@ -138,8 +150,28 @@ export default function App() {
         }
       });
       
-      setLocalStream(stream);
-      streamRef.current = stream;
+      const oldVideoTrack = streamRef.current?.getVideoTracks()[0];
+      const newVideoTrack = screenStream.getVideoTracks()[0];
+
+      if (oldVideoTrack && newVideoTrack) {
+        peersRef.current.forEach(p => {
+          try {
+            p.peer.replaceTrack(oldVideoTrack, newVideoTrack, streamRef.current!);
+          } catch(e) {
+            console.warn("Could not replace track", e);
+          }
+        });
+        
+        streamRef.current?.removeTrack(oldVideoTrack);
+        streamRef.current?.addTrack(newVideoTrack);
+        
+        setLocalStream(new MediaStream(streamRef.current!.getTracks()));
+      }
+
+      newVideoTrack.onended = () => {
+        stopScreenShare();
+      };
+      
       setIsSharing(true);
       setError(null);
     } catch (err: any) {
@@ -154,52 +186,156 @@ export default function App() {
     }
   };
 
-  const stopScreenShare = () => {
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach(track => track.stop());
+  const stopScreenShare = async () => {
+    try {
+      const videoTrackToStop = streamRef.current?.getVideoTracks()[0];
+      if (videoTrackToStop) {
+        videoTrackToStop.stop();
+        streamRef.current?.removeTrack(videoTrackToStop);
+      }
+
+      const cameraStream = await navigator.mediaDevices.getUserMedia({ video: true });
+      const newVideoTrack = cameraStream.getVideoTracks()[0];
+      
+      if (!videoEnabled) {
+         newVideoTrack.enabled = false;
+      }
+
+      const oldVideoTrack = videoTrackToStop;
+      
+      streamRef.current?.addTrack(newVideoTrack);
+      setLocalStream(new MediaStream(streamRef.current!.getTracks()));
+
+      if (oldVideoTrack && newVideoTrack) {
+        peersRef.current.forEach(p => {
+          try {
+            p.peer.replaceTrack(oldVideoTrack, newVideoTrack, streamRef.current!);
+          } catch(e) {
+            console.warn("Failed to replace track:", e);
+          }
+        });
+      }
+
+      setIsSharing(false);
+    } catch (err) {
+      console.error("Error reverting to camera:", err);
     }
-    setLocalStream(null);
-    streamRef.current = null;
-    setIsSharing(false);
   };
 
   const joinRoom = (e: React.FormEvent) => {
     e.preventDefault();
     if (!roomId || !userName) return;
 
-    // Check if already in a room
     if (inRoom) {
       setError("You are already in a room. Please leave first.");
       return;
     }
 
-    // Clear any previous error when joining new room
     setError(null);
-    
-    // Update current room ID when successfully joining
     setCurrentRoomId(roomId);
     
-    // Simple demo mode - just show local video
-    setInRoom(true);
-    
-    // Try to get camera/mic immediately
     navigator.mediaDevices.getUserMedia({ video: true, audio: true })
       .then(stream => {
         setLocalStream(stream);
+        streamRef.current = stream;
         setVideoEnabled(true);
         setMicEnabled(true);
+        
+        setInRoom(true);
+
+        socketRef.current = io("/");
+
+        socketRef.current.emit("join-room", roomId);
+
+        socketRef.current.on("user-joined", (userId: string) => {
+          const peer = new Peer({
+            initiator: true,
+            trickle: false,
+            stream: streamRef.current || undefined,
+          });
+
+          peer.on("signal", signal => {
+            socketRef.current?.emit("signal", { to: userId, signal });
+          });
+
+          peer.on("stream", peerStream => {
+            addPeerStream(userId, peer, peerStream);
+          });
+          
+          peer.on("close", () => {
+             peersRef.current = peersRef.current.filter(p => p.peerId !== userId);
+             updatePeersState();
+          });
+
+          peersRef.current.push({ peerId: userId, peer });
+          updatePeersState();
+        });
+
+        socketRef.current.on("signal", (data: { from: string; signal: any }) => {
+          let peerConn = peersRef.current.find(p => p.peerId === data.from);
+          if (!peerConn) {
+            const peer = new Peer({
+              initiator: false,
+              trickle: false,
+              stream: streamRef.current || undefined,
+            });
+
+            peer.on("signal", signal => {
+              socketRef.current?.emit("signal", { to: data.from, signal });
+            });
+
+            peer.on("stream", peerStream => {
+              addPeerStream(data.from, peer, peerStream);
+            });
+            
+            peer.on("close", () => {
+             peersRef.current = peersRef.current.filter(p => p.peerId !== data.from);
+             updatePeersState();
+            });
+
+            peer.signal(data.signal);
+            peersRef.current.push({ peerId: data.from, peer });
+            updatePeersState();
+          } else {
+            peerConn.peer.signal(data.signal);
+          }
+        });
+
+        socketRef.current.on("user-left", (userId: string) => {
+          const peerConn = peersRef.current.find(p => p.peerId === userId);
+          if (peerConn) {
+            peerConn.peer.destroy();
+          }
+          peersRef.current = peersRef.current.filter(p => p.peerId !== userId);
+          updatePeersState();
+        });
+
       })
       .catch(err => {
         console.error("Error accessing media:", err);
-        setError("Could not access camera/microphone.");
+        setError("Could not access camera/microphone. Please allow permissions.");
       });
   };
 
   const leaveRoom = () => {
-    stopScreenShare();
+    if (isSharing) {
+      stopScreenShare();
+    }
+    
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach(track => track.stop());
+    }
+    setLocalStream(null);
+    streamRef.current = null;
+
+    if (socketRef.current) {
+      socketRef.current.disconnect();
+      socketRef.current = null;
+    }
+    
+    clearAllPeers();
+
     setInRoom(false);
-    setPeers([]);
-    peersRef.current = [];
     setRoomId('');
     setUserName('');
     setCurrentRoomId('');
@@ -275,15 +411,12 @@ export default function App() {
 
             <div className="mt-6 pt-6 border-t border-white/5 flex flex-col sm:flex-row items-center justify-between space-y-4 sm:space-y-0">
               <button 
+                type="button"
                 onClick={() => setRoomId(Math.random().toString(36).substring(7))}
                 className="text-sm text-zinc-400 hover:text-white transition-colors"
               >
                 Generate new ID
               </button>
-              <div className="flex items-center text-xs text-zinc-500">
-                <Users className="w-3 h-3 mr-1" />
-                Demo Mode - Local Only
-              </div>
             </div>
           </div>
         </motion.div>
@@ -302,13 +435,13 @@ export default function App() {
             <h1 className="text-sm font-bold font-display">ScreenShare Hub</h1>
             <div className="flex items-center text-[10px] text-zinc-500 uppercase tracking-widest">
               <div className="w-1.5 h-1.5 bg-green-500 rounded-full mr-1.5 animate-pulse" />
-              Demo Room: {roomId}
+              Room: {currentRoomId}
             </div>
           </div>
           <div className="sm:hidden">
             <div className="flex items-center text-[10px] text-zinc-500 uppercase tracking-widest">
               <div className="w-1.5 h-1.5 bg-green-500 rounded-full mr-1.5 animate-pulse" />
-              {roomId.substring(0, 8)}...
+              {currentRoomId.substring(0, 8)}...
             </div>
           </div>
         </div>
@@ -358,8 +491,8 @@ export default function App() {
             {peers.length === 0 && !isSharing && (
               <div className="aspect-video rounded-2xl border-2 border-dashed border-white/5 flex flex-col items-center justify-center text-zinc-600">
                 <Users className="w-12 h-12 mb-4 opacity-20" />
-                <p className="text-sm font-medium">Demo Mode - Local Only</p>
-                <p className="text-xs text-zinc-500 mt-2">Multi-user requires server setup</p>
+                <p className="text-sm font-medium">Waiting for others to join...</p>
+                <p className="text-xs text-zinc-500 mt-2">Share the room link to invite friends</p>
               </div>
             )}
           </div>
