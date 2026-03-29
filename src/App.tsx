@@ -65,6 +65,7 @@ const VideoTile = ({ stream, isLocal, name }: { stream?: MediaStream; isLocal?: 
 
 export default function App() {
   const [roomId, setRoomId] = useState('');
+  const [currentRoomId, setCurrentRoomId] = useState('');
   const [inRoom, setInRoom] = useState(false);
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [peers, setPeers] = useState<PeerConnection[]>([]);
@@ -172,6 +173,12 @@ export default function App() {
       return;
     }
 
+    // Clear any previous error when joining new room
+    setError(null);
+    
+    // Update current room ID when successfully joining
+    setCurrentRoomId(roomId);
+    
     // Simple demo mode - just show local video
     setInRoom(true);
     
@@ -195,12 +202,13 @@ export default function App() {
     peersRef.current = [];
     setRoomId('');
     setUserName('');
+    setCurrentRoomId('');
     setError(null);
   };
 
   const copyRoomLink = () => {
     const url = new URL(window.location.href);
-    url.searchParams.set('room', roomId);
+    url.searchParams.set('room', currentRoomId || roomId);
     navigator.clipboard.writeText(url.toString());
   };
 
